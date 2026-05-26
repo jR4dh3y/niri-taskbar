@@ -1,0 +1,81 @@
+name: aur
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AUR_PKGNAME: waybar-niri-taskbar-focused-git
+
+jobs:
+  deploy-aur:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Update AUR packaging files
+        run: |
+          pkgdir="packaging/aur/${AUR_PKGNAME}"
+
+          if version="$(git describe --long --tags --match 'v*' 2>/dev/null)"; then
+            pkgver="$(printf '%s\n' "${version}" | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g')"
+          else
+            pkgver="0.4.0.r$(git rev-list --count HEAD).g$(git rev-parse --short HEAD)"
+          fi
+
+          sed -i "s/^pkgver=.*/pkgver=${pkgver}/" "${pkgdir}/PKGBUILD"
+          ./scripts/generate-aur-srcinfo.sh "${pkgdir}"
+
+      - name: Configure AUR SSH key
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          test -n "${AUR_SSH_PRIVATE_KEY}"
+
+          mkdir -p "${HOME}/.ssh"
+          printf '%s\n' "${AUR_SSH_PRIVATE_KEY}" > "${HOME}/.ssh/aur"
+          chmod 600 "${HOME}/.ssh/aur"
+
+          ssh-keyscan -t rsa,ecdsa,ed25519 aur.archlinux.org > "${HOME}/.ssh/known_hosts"
+          ssh-keygen -lf "${HOME}/.ssh/known_hosts" > "${HOME}/.ssh/known_hosts.fingerprints"
+
+          grep -Fq 'SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4' "${HOME}/.ssh/known_hosts.fingerprints"
+          grep -Fq 'SHA256:uTa/0PndEgPZTf76e1DFqXKJEXKsn7m9ivhLQtzGOCI' "${HOME}/.ssh/known_hosts.fingerprints"
+          grep -Fq 'SHA256:5s5cIyReIfNNVGRFdDbe3hdYiI5OelHGpw2rOUud3Q8' "${HOME}/.ssh/known_hosts.fingerprints"
+
+      - name: Deploy to AUR
+        env:
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/aur -o IdentitiesOnly=yes
+        run: |
+          aur_remote="ssh://aur@aur.archlinux.org/${AUR_PKGNAME}.git"
+
+          if ! git clone "${aur_remote}" aur-package; then
+            mkdir aur-package
+            git -C aur-package init
+            git -C aur-package remote add origin "${aur_remote}"
+          fi
+
+          cp "packaging/aur/${AUR_PKGNAME}/PKGBUILD" aur-package/PKGBUILD
+          cp "packaging/aur/${AUR_PKGNAME}/.SRCINFO" aur-package/.SRCINFO
+
+          cd aur-package
+          git config user.name "${GITHUB_ACTOR}"
+          git config user.email "${GITHUB_ACTOR}@users.noreply.github.com"
+          git add PKGBUILD .SRCINFO
+
+          if git diff --cached --quiet; then
+            echo "AUR package is already up to date."
+            exit 0
+          fi
+
+          git commit -m "Update ${AUR_PKGNAME}"
+          git push origin HEAD:master
