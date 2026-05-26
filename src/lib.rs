@@ -8,6 +8,7 @@ use config::Config;
 use error::Error;
 use futures::StreamExt;
 use niri::{Snapshot, Window};
+use niri_ipc::Workspace;
 use notify::EnrichedNotification;
 use output::Matcher;
 use process::Process;
@@ -16,9 +17,9 @@ use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 use waybar_cffi::{
     Module,
     gtk::{
-        self, Orientation, gio,
+        self, Label, Orientation, gio,
         glib::MainContext,
-        traits::{BoxExt, ContainerExt, StyleContextExt, WidgetExt},
+        traits::{BoxExt, ContainerExt, LabelExt, StyleContextExt, WidgetExt},
     },
     waybar_module,
 };
@@ -84,6 +85,7 @@ async fn init(info: &waybar_cffi::InitInfo, state: State) -> Result<(), Error> {
 struct Instance {
     buttons: BTreeMap<u64, Button>,
     container: gtk::Box,
+    workspace_labels: BTreeMap<u64, Label>,
     last_snapshot: Option<Snapshot>,
     state: State,
 }
@@ -93,6 +95,7 @@ impl Instance {
         Self {
             buttons: Default::default(),
             container,
+            workspace_labels: Default::default(),
             last_snapshot: None,
             state,
         }
@@ -363,36 +366,45 @@ impl Instance {
     ) {
         // We need to track which, if any, windows are no longer present.
         let mut omitted = self.buttons.keys().copied().collect::<BTreeSet<_>>();
+        let mut omitted_workspaces = self
+            .workspace_labels
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>();
 
-        for window in windows.iter().filter(|window| {
-            filter
-                .lock()
-                .expect("output filter lock")
-                .should_show(window.output().unwrap_or_default())
-        }) {
-            let button = match self.buttons.entry(window.id) {
-                Entry::Occupied(entry) => entry.into_mut(),
-                Entry::Vacant(entry) => {
-                    let button = Button::new(&self.state, window);
+        let output_filter = filter.lock().expect("output filter lock").clone();
+        let workspaces = windows.workspaces.iter().filter(|workspace| {
+            output_filter.should_show(workspace.output.as_deref().unwrap_or_default())
+        });
 
-                    // Implicitly adding the button widget to the box as we create it simplifies
-                    // reordering, since it means we can just do it as we go.
-                    self.container.add(button.widget());
-                    entry.insert(button)
+        for workspace in workspaces {
+            omitted_workspaces.remove(&workspace.id);
+
+            let label = self.workspace_label(workspace);
+            self.container.reorder_child(&label, -1);
+
+            if workspace.is_active {
+                for window in windows.iter().filter(|window| {
+                    window.workspace_id == Some(workspace.id)
+                        && output_filter.should_show(window.output().unwrap_or_default())
+                }) {
+                    let button = match self.buttons.entry(window.id) {
+                        Entry::Occupied(entry) => entry.into_mut(),
+                        Entry::Vacant(entry) => {
+                            let button = Button::new(&self.state, window);
+
+                            self.container.add(button.widget());
+                            entry.insert(button)
+                        }
+                    };
+
+                    button.set_focus(window.is_focused);
+                    button.set_title(window.title.as_deref());
+
+                    omitted.remove(&window.id);
+                    self.container.reorder_child(button.widget(), -1);
                 }
-            };
-
-            // Update the window properties.
-            button.set_focus(window.is_focused);
-            button.set_title(window.title.as_deref());
-
-            // Ensure we don't remove this button from the container.
-            omitted.remove(&window.id);
-
-            // Since we get the windows in order in the snapshot, we can just
-            // push this to the back and then let other widgets push in front as
-            // we iterate.
-            self.container.reorder_child(button.widget(), -1);
+            }
         }
 
         // Remove any windows that no longer exist.
@@ -402,11 +414,48 @@ impl Instance {
             }
         }
 
+        // Remove any workspace labels that no longer exist.
+        for id in omitted_workspaces.into_iter() {
+            if let Some(label) = self.workspace_labels.remove(&id) {
+                self.container.remove(&label);
+            }
+        }
+
         // Ensure everything is rendered.
         self.container.show_all();
 
         // Update the last snapshot.
         self.last_snapshot = Some(windows);
+    }
+
+    fn workspace_label(&mut self, workspace: &Workspace) -> Label {
+        let label = match self.workspace_labels.entry(workspace.id) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let label = Label::new(None);
+                label.style_context().add_class("workspace-label");
+                self.container.add(&label);
+                entry.insert(label)
+            }
+        };
+
+        label.set_text(
+            workspace
+                .name
+                .as_deref()
+                .map(str::to_owned)
+                .unwrap_or_else(|| workspace.idx.to_string())
+                .as_str(),
+        );
+
+        let context = label.style_context();
+        if workspace.is_active {
+            context.add_class("focused");
+        } else {
+            context.remove_class("focused");
+        }
+
+        label.clone()
     }
 }
 

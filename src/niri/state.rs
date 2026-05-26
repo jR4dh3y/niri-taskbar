@@ -206,17 +206,31 @@ impl Niri {
                 .then_with(|| a.window.id.cmp(&b.window.id))
         });
 
-        wws.into_iter()
-            .map(|ww| Window {
-                window: ww.window.clone(),
-                output: ww.workspace.output.clone(),
-            })
-            .collect()
+        Snapshot {
+            windows: wws
+                .into_iter()
+                .map(|ww| Window {
+                    window: ww.window.clone(),
+                    output: ww.workspace.output.clone(),
+                })
+                .collect(),
+            workspaces: self.workspaces.values().cloned().collect(),
+        }
     }
 }
 
 /// A snapshot of current toplevel windows, ordered by workspace index.
-pub type Snapshot = Vec<Window>;
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    pub windows: Vec<Window>,
+    pub workspaces: Vec<Workspace>,
+}
+
+impl Snapshot {
+    pub fn iter(&self) -> std::slice::Iter<'_, Window> {
+        self.windows.iter()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Window {
