@@ -43,6 +43,30 @@ impl WindowSet {
                     self.0 = Some(Inner::Ready(state));
                 }
             },
+            Event::WorkspaceUrgencyChanged { id, urgent } => {
+                if let Some(Inner::Ready(state)) = &mut self.0 {
+                    state.set_workspace_urgency(id, urgent);
+                } else {
+                    tracing::warn!(%self, "unexpected state for WorkspaceUrgencyChanged event");
+                }
+            }
+            Event::WorkspaceActivated { id, focused } => {
+                if let Some(Inner::Ready(state)) = &mut self.0 {
+                    state.activate_workspace(id, focused);
+                } else {
+                    tracing::warn!(%self, "unexpected state for WorkspaceActivated event");
+                }
+            }
+            Event::WorkspaceActiveWindowChanged {
+                workspace_id,
+                active_window_id,
+            } => {
+                if let Some(Inner::Ready(state)) = &mut self.0 {
+                    state.set_workspace_active_window(workspace_id, active_window_id);
+                } else {
+                    tracing::warn!(%self, "unexpected state for WorkspaceActiveWindowChanged event");
+                }
+            }
             Event::WindowClosed { id } => {
                 if let Some(Inner::Ready(state)) = &mut self.0 {
                     state.remove_window(id);
@@ -143,6 +167,37 @@ impl Niri {
 
     fn replace_workspaces(&mut self, workspaces: Vec<Workspace>) {
         self.workspaces = workspaces.into_iter().map(|ws| (ws.id, ws)).collect();
+    }
+
+    fn set_workspace_urgency(&mut self, id: u64, urgent: bool) {
+        if let Some(workspace) = self.workspaces.get_mut(&id) {
+            workspace.is_urgent = urgent;
+        }
+    }
+
+    fn activate_workspace(&mut self, id: u64, focused: bool) {
+        let Some(workspace) = self.workspaces.get(&id) else {
+            tracing::warn!(id, "activated workspace was missing from the map");
+            return;
+        };
+        let output = workspace.output.clone();
+
+        for workspace in self.workspaces.values_mut() {
+            let got_activated = workspace.id == id;
+            if workspace.output == output {
+                workspace.is_active = got_activated;
+            }
+
+            if focused {
+                workspace.is_focused = got_activated;
+            }
+        }
+    }
+
+    fn set_workspace_active_window(&mut self, workspace_id: u64, active_window_id: Option<u64>) {
+        if let Some(workspace) = self.workspaces.get_mut(&workspace_id) {
+            workspace.active_window_id = active_window_id;
+        }
     }
 
     fn set_focus(&mut self, id: Option<u64>) {
